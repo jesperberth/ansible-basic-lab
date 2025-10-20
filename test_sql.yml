@@ -1,0 +1,145 @@
+---
+- name: Diagnose Remote SQL Server Connection
+  hosts: windows
+  gather_facts: true
+
+  vars:
+    sql_sa_password: "P@ssw0rd123!"
+    sql_instance_name: SQLEXPRESS
+
+  tasks:
+    - name: Get Windows host IP address
+      ansible.builtin.set_fact:
+        sql_host: "{{ hostvars[inventory_hostname]['ansible_host'] | default(inventory_hostname) }}"
+
+    - name: Check SQL Server remote connections setting
+      ansible.windows.win_shell: |
+        sqlcmd -S localhost\{{ sql_instance_name }} -U sa -P "{{ sql_sa_password }}" -Q "EXEC sp_configure 'remote access'"
+      register: remote_access_check
+
+    - name: Display remote access setting
+      ansible.builtin.debug:
+        msg: "{{ remote_access_check.stdout_lines }}"
+
+    - name: Check if work1 login exists
+      ansible.windows.win_shell: |
+        sqlcmd -S localhost\{{ sql_instance_name }} -U sa -P "{{ sql_sa_password }}" -Q "SELECT name, type_desc, is_disabled, create_date FROM sys.server_principals WHERE name = 'work1'"
+      register: work1_check
+      failed_when: false
+
+    - name: Display work1 login status
+      ansible.builtin.debug:
+        msg: "{{ work1_check.stdout_lines if work1_check.rc == 0 else 'Login work1 does not exist' }}"
+
+    - name: Check SQL Server authentication mode
+      ansible.windows.win_shell: |
+        sqlcmd -S localhost\{{ sql_instance_name }} -U sa -P "{{ sql_sa_password }}" -Q "SELECT SERVERPROPERTY('IsIntegratedSecurityOnly') AS IsWindowsAuthOnly"
+      register: auth_mode_check
+
+    - name: Display authentication mode
+      ansible.builtin.debug:
+        msg: "{{ auth_mode_check.stdout_lines }} (0 = Mixed Mode, 1 = Windows Only)"
+
+    - name: Verify TCP/IP is enabled and check port
+      ansible.windows.win_shell: |
+        $listener = Get-NetTCPConnection -LocalPort 1433 -State Listen -ErrorAction SilentlyContinue
+        if ($listener) {
+          $process = Get-Process -Id $listener.OwningProcess
+          Write-Output "Port 1433 is LISTENING"
+          Write-Output "Process: $($process.Name) (PID: $($process.Id))"
+          Write-Output "Local Address: $($listener.LocalAddress)"
+        } else {
+          Write-Output "Port 1433 is NOT listening"
+        }
+      register: tcp_check
+
+    - name: Display TCP/IP status
+      ansible.builtin.debug:
+        msg: "{{ tcp_check.stdout_lines }}"
+
+    - name: Test network connectivity from control node
+      ansible.builtin.wait_for:
+        host: "{{ sql_host }}"
+        port: 1433
+        timeout: 5
+      delegate_to: localhost
+      register: network_test
+      failed_when: false
+
+    - name: Display network test result
+      ansible.builtin.debug:
+        msg: "{{ 'SUCCESS: Port 1433 is reachable from control node' if network_test.failed == false else 'FAILED: Cannot reach port 1433 from control node' }}"
+      delegate_to: localhost
+
+    - name: Test SA login from control node using pymssql
+      ansible.builtin.shell: |
+        python3 -c "
+        import pymssql
+        try:
+            conn = pymssql.connect(
+                server='{{ sql_host }}',
+                user='sa',
+                password='{{ sql_sa_password }}',
+                port=1433,
+                timeout=10
+            )
+            cursor = conn.cursor()
+            cursor.execute('SELECT @@VERSION')
+            row = cursor.fetchone()
+            print('SUCCESS: SA login works remotely')
+            print(row[0][:100])
+            conn.close()
+        except Exception as e:
+            print(f'FAILED: {e}')
+            exit(1)
+        "
+      delegate_to: localhost
+      register: sa_remote_test
+      failed_when: false
+
+    - name: Display SA remote test result
+      ansible.builtin.debug:
+        msg: "{{ sa_remote_test.stdout_lines }}"
+      delegate_to: localhost
+
+    - name: Test work1 login from control node using pymssql
+      ansible.builtin.shell: |
+        python3 -c "
+        import pymssql
+        try:
+            conn = pymssql.connect(
+                server='{{ sql_host }}',
+                user='work1',
+                password='REPLACE_WITH_ACTUAL_PASSWORD',
+                port=1433,
+                timeout=10
+            )
+            print('SUCCESS: work1 login works remotely')
+            conn.close()
+        except Exception as e:
+            print(f'FAILED: {e}')
+        "
+      delegate_to: localhost
+      register: work1_remote_test
+      failed_when: false
+
+    - name: Display work1 remote test result
+      ansible.builtin.debug:
+        msg: "{{ work1_remote_test.stdout_lines }}"
+      delegate_to: localhost
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "=== DIAGNOSIS SUMMARY ==="
+          - "SQL Server IP: {{ sql_host }}"
+          - "Authentication Mode: Check output above (should be 0 for Mixed Mode)"
+          - "Port 1433 Status: Check output above"
+          - "Network Connectivity: Check output above"
+          - "SA Remote Access: Check output above"
+          - "work1 Login: Check output above"
+          - ""
+          - "Next steps:"
+          - "1. If auth mode is 1 (Windows Only), run the enable_sql_auth playbook"
+          - "2. If work1 login doesn't exist, create it with SA account"
+          - "3. If SA works remotely but work1 doesn't, the work1 password might be wrong"

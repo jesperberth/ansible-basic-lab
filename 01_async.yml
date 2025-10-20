@@ -1,0 +1,58 @@
+---
+- name: Async Loop Playbook
+  hosts: copenhagen
+  gather_facts: true
+
+  tasks:
+    - name: Start multiple long-running updates in parallel
+      ansible.builtin.command: sleep {{ item }}
+      loop:
+        - 30
+        - 45
+        - 60
+      async: 120
+      poll: 0
+      register: async_jobs
+
+    - name: Wait for all jobs to complete
+      ansible.builtin.async_status:
+        jid: "{{ item.ansible_job_id }}"
+      register: async_results
+      until: async_results.finished
+      retries: 30
+      delay: 5
+      loop: "{{ async_jobs.results }}"
+
+    - name: Show completion times
+      ansible.builtin.debug:
+        msg: "Job {{ item.item }} completed in {{ item.delta }} seconds"
+      loop: "{{ async_results.results }}"
+
+    - name: Install packages in parallel
+      ansible.builtin.dnf:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - htop
+        - tmux
+        - tree
+      async: 300
+      poll: 0
+      register: package_jobs
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Wait for package installations
+      ansible.builtin.async_status:
+        jid: "{{ item.ansible_job_id }}"
+      register: package_results
+      until: package_results.finished
+      retries: 60
+      delay: 5
+      loop: "{{ package_jobs.results }}"
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Show installation results
+      ansible.builtin.debug:
+        msg: "Package {{ item.item }} installed: {{ item.changed }}"
+      loop: "{{ package_results.results }}"
+      when: ansible_facts['os_family'] == 'RedHat'

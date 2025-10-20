@@ -1,0 +1,123 @@
+---
+- name: Enable SQL Server Mixed Mode Authentication
+  hosts: windows
+  gather_facts: true
+  become: true
+  become_method: runas
+  become_user: SYSTEM
+
+  vars:
+    sql_instance_name: SQLEXPRESS
+    sql_sa_password: "P@ssw0rd123!"
+
+  tasks:
+    - name: Check current authentication mode
+      ansible.windows.win_shell: |
+        $instanceName = "SQLEXPRESS"
+        $regPath = Get-Item "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL*.$instanceName\MSSQLServer" | Select-Object -First 1
+
+        if ($regPath) {
+          $loginMode = Get-ItemProperty -Path $regPath.PSPath -Name LoginMode
+          Write-Output "Current LoginMode: $($loginMode.LoginMode)"
+        }
+      register: current_mode
+      changed_when: false
+
+    - name: Display current mode
+      ansible.builtin.debug:
+        msg: "{{ current_mode.stdout_lines }}"
+
+    - name: Enable SQL Server mixed mode authentication
+      ansible.windows.win_shell: |
+        $instanceName = "SQLEXPRESS"
+        $regPath = Get-Item "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL*.$instanceName\MSSQLServer" | Select-Object -First 1
+
+        if ($regPath) {
+          # Set LoginMode to 2 (Mixed Mode)
+          Set-ItemProperty -Path $regPath.PSPath -Name LoginMode -Value 2
+          Write-Output "Mixed Mode Authentication enabled"
+          Write-Output "Registry path: $($regPath.PSPath)"
+        } else {
+          Write-Error "Could not find SQL Server registry path"
+          exit 1
+        }
+      register: enable_result
+
+    - name: Display result
+      ansible.builtin.debug:
+        msg: "{{ enable_result.stdout_lines }}"
+
+    - name: Restart SQL Server service to apply changes
+      ansible.windows.win_service:
+        name: "MSSQL${{ sql_instance_name }}"
+        state: restarted
+
+    - name: Wait for SQL Server service to be running
+      ansible.windows.win_service_info:
+        name: "MSSQL${{ sql_instance_name }}"
+      register: service_status
+      until: service_status.services[0].state == 'started'
+      retries: 30
+      delay: 2
+
+    - name: Enable SA login using Windows Authentication
+      ansible.windows.win_shell: |
+        # Wait a bit for SQL Server to be fully ready
+        Start-Sleep -Seconds 5
+
+        # Enable SA login and set password
+        sqlcmd -S localhost\{{ sql_instance_name }} -E -Q "
+        ALTER LOGIN sa ENABLE;
+        ALTER LOGIN sa WITH PASSWORD = '{{ sql_sa_password }}';
+        PRINT 'SA login enabled and password set';
+        "
+      register: enable_sa
+      failed_when: false
+
+    - name: Display SA enable result
+      ansible.builtin.debug:
+        msg: "{{ enable_sa.stdout_lines if enable_sa.rc == 0 else 'Note: ' + enable_sa.stderr }}"
+
+    - name: Test SA login with SQL authentication
+      ansible.windows.win_shell: |
+        sqlcmd -S localhost\{{ sql_instance_name }} -U sa -P "{{ sql_sa_password }}" -Q "SELECT 'SA Login Test Successful' AS Result, @@VERSION AS Version"
+      register: sa_test
+      failed_when: false
+      changed_when: false
+
+    - name: Display SA test result
+      ansible.builtin.debug:
+        msg: "{{ sa_test.stdout_lines if sa_test.rc == 0 else 'SA test failed: ' + sa_test.stderr }}"
+
+    - name: Verify authentication mode after restart
+      ansible.windows.win_shell: |
+        $instanceName = "SQLEXPRESS"
+        $regPath = Get-Item "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL*.$instanceName\MSSQLServer" | Select-Object -First 1
+
+        if ($regPath) {
+          $loginMode = Get-ItemProperty -Path $regPath.PSPath -Name LoginMode
+          switch ($loginMode.LoginMode) {
+            1 { Write-Output "Windows Authentication Only" }
+            2 { Write-Output "Mixed Mode (SQL + Windows Authentication) - SUCCESS!" }
+            default { Write-Output "Unknown: $($loginMode.LoginMode)" }
+          }
+        }
+      register: verify_mode
+      changed_when: false
+
+    - name: Display final authentication mode
+      ansible.builtin.debug:
+        msg: "{{ verify_mode.stdout_lines }}"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "=== Mixed Mode Authentication Setup Complete ==="
+          - "SA Username: sa"
+          - "SA Password: {{ sql_sa_password }}"
+          - ""
+          - "If SA test above was successful, you can now:"
+          - "1. Create SQL logins (like work1)"
+          - "2. Connect remotely using SQL authentication"
+          - ""
+          - "Next: Run create_work1_login.yml to create the work1 user"

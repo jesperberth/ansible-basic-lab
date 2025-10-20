@@ -1,0 +1,87 @@
+---
+- name: Check SQL Server Authentication Mode
+  hosts: windows
+  gather_facts: true
+
+  vars:
+    sql_instance_name: SQLEXPRESS
+
+  tasks:
+    - name: Check authentication mode via registry
+      ansible.windows.win_shell: |
+        $instanceName = "SQLEXPRESS"
+        $regPath = Get-Item "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL*.$instanceName\MSSQLServer" -ErrorAction SilentlyContinue | Select-Object -First 1
+
+        if ($regPath) {
+          $loginMode = Get-ItemProperty -Path $regPath.PSPath -Name LoginMode -ErrorAction SilentlyContinue
+          Write-Output "Registry Path: $($regPath.PSPath)"
+          Write-Output "LoginMode Value: $($loginMode.LoginMode)"
+          switch ($loginMode.LoginMode) {
+            1 { Write-Output "STATUS: Windows Authentication Only" }
+            2 { Write-Output "STATUS: Mixed Mode (SQL + Windows Authentication)" }
+            default { Write-Output "STATUS: Unknown ($($loginMode.LoginMode))" }
+          }
+        } else {
+          Write-Output "ERROR: Could not find SQL Server registry path"
+        }
+      register: registry_check
+
+    - name: Display registry authentication mode
+      ansible.builtin.debug:
+        msg: "{{ registry_check.stdout_lines }}"
+
+    - name: Test SA login with the playbook password
+      ansible.windows.win_shell: |
+        sqlcmd -S localhost\{{ sql_instance_name }} -U sa -P "P@ssw0rd123!" -Q "SELECT 'SA Login Works' AS Result"
+      register: sa_test_1
+      failed_when: false
+      changed_when: false
+
+    - name: Display SA test with P@ssw0rd123!
+      ansible.builtin.debug:
+        msg: "{{ 'SUCCESS' if sa_test_1.rc == 0 else 'FAILED: ' + sa_test_1.stderr }}"
+
+    - name: Test with Windows Authentication (should always work)
+      ansible.windows.win_shell: |
+        sqlcmd -S localhost\{{ sql_instance_name }} -E -Q "SELECT 'Windows Auth Works' AS Result, SYSTEM_USER AS CurrentUser"
+      register: windows_auth_test
+      failed_when: false
+
+    - name: Display Windows auth test
+      ansible.builtin.debug:
+        msg: "{{ windows_auth_test.stdout_lines if windows_auth_test.rc == 0 else 'FAILED: ' + windows_auth_test.stderr }}"
+
+    - name: Check if SA login is enabled (using Windows auth)
+      ansible.windows.win_shell: |
+        sqlcmd -S localhost\{{ sql_instance_name }} -E -Q "SELECT name, is_disabled, create_date, modify_date FROM sys.sql_logins WHERE name = 'sa'"
+      register: sa_status
+      failed_when: false
+
+    - name: Display SA login status
+      ansible.builtin.debug:
+        msg: "{{ sa_status.stdout_lines if sa_status.rc == 0 else 'Could not check SA status' }}"
+
+    - name: Check all SQL logins that exist
+      ansible.windows.win_shell: |
+        sqlcmd -S localhost\{{ sql_instance_name }} -E -Q "SELECT name, is_disabled, create_date FROM sys.sql_logins ORDER BY name"
+      register: all_logins
+      failed_when: false
+
+    - name: Display all SQL logins
+      ansible.builtin.debug:
+        msg: "{{ all_logins.stdout_lines if all_logins.rc == 0 else 'Could not list logins' }}"
+
+    - name: Summary and recommendations
+      ansible.builtin.debug:
+        msg:
+          - "=== SUMMARY ==="
+          - "1. Check the LoginMode value above:"
+          - "   - 1 = Windows Only (PROBLEM - need to enable Mixed Mode)"
+          - "   - 2 = Mixed Mode (GOOD)"
+          - ""
+          - "2. If LoginMode = 1, run: ansible-playbook -i inventory_windows_ssh.yml enable_mixed_mode.yml"
+          - ""
+          - "3. If SA login test failed, either:"
+          - "   - The password is wrong"
+          - "   - SA is disabled"
+          - "   - Mixed mode is not enabled"
