@@ -2,8 +2,6 @@
 - name: Azure Create RG
   hosts: localhost
   connection: local
-  vars:
-    user: work1
   tasks:
     - name: Create resource group
       azure.azcollection.azure_rm_resourcegroup:
