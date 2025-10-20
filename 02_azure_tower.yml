@@ -89,9 +89,9 @@
         image:
           offer: RHEL
           publisher: RedHat
-          sku: "8_4"
+          sku: "9_4"
           version: latest
-        vm_size: Standard_A1_v2
+        vm_size: Standard_B2s
         network_interfaces: "webserver_nic01"
         tags:
             solution: "webserver_{{ user }}"
