@@ -25,6 +25,16 @@
       register: ovirt_auth
       no_log: true
 
+    - name: Ensure datacenter exists
+      ovirt.ovirt.ovirt_datacenter:
+        auth: "{{ ovirt_auth.ansible_facts.ovirt_auth }}"
+        name: "{{ datacenter_name }}"
+        description: "Default datacenter"
+        comment: "Created by Ansible"
+        compatibility_version: "4.7"
+        local: true
+        state: present
+
     - name: Add local storage domain
       ovirt.ovirt.ovirt_storage_domain:
         auth: "{{ ovirt_auth.ansible_facts.ovirt_auth }}"

@@ -1,0 +1,227 @@
+---
+- name: Deploy oVirt Hosted Engine 4.5 - Single Host with Answer File
+  hosts: ovirthosts
+  become: true
+  gather_facts: true
+  vars:
+    engine_fqdn: "ovirt-mgt.internal.cloudapp.net"
+    engine_ip: "10.1.0.25"
+    engine_gateway: "10.1.0.1"
+    engine_dns: "168.63.129.16"
+    engine_password: "ChangeMe123!"
+    local_storage_path: "/data/ovirt-storage"
+    gluster_volume_name: "engine"
+    engine_vm_memory: "8192"
+    engine_vm_vcpus: "4"
+    engine_vm_disk_size: "100"
+
+  tasks:
+    - name: 1. Install required packages
+      ansible.builtin.dnf:
+        name:
+          - ovirt-hosted-engine-setup
+          - ovirt-engine-appliance
+          - glusterfs-server
+          - vdsm-gluster
+          - firewalld
+        state: present
+
+    - name: 2. Start and enable services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - firewalld
+        - libvirtd
+        - glusterd
+
+    - name: 3. Configure firewall
+      ansible.posix.firewalld:
+        service: "{{ item }}"
+        permanent: true
+        state: enabled
+        immediate: true
+      loop:
+        - ovirt-imageio
+        - ovirt-vmconsole
+        - libvirt
+        - glusterfs
+        - http
+        - https
+
+    - name: 4. Verify ovirtmgmt bridge
+      ansible.builtin.command: ip link show ovirtmgmt
+      register: bridge_check
+      failed_when: bridge_check.rc != 0
+      changed_when: false
+
+    - name: 5. Create brick directory
+      ansible.builtin.file:
+        path: "{{ local_storage_path }}/brick1"
+        state: directory
+        mode: '0755'
+
+    - name: 6. Setup GlusterFS volume
+      block:
+        - name: Check if volume exists
+          ansible.builtin.command: gluster volume info {{ gluster_volume_name }}
+          register: volume_check
+          failed_when: false
+          changed_when: false
+
+        - name: Create Gluster volume
+          ansible.builtin.command: >
+            gluster volume create {{ gluster_volume_name }}
+            {{ ansible_fqdn }}:{{ local_storage_path }}/brick1
+            force
+          when: volume_check.rc != 0
+
+        - name: Set volume options
+          ansible.builtin.command: >
+            gluster volume set {{ gluster_volume_name }} {{ item }}
+          loop:
+            - "storage.owner-uid 36"
+            - "storage.owner-gid 36"
+            - "network.ping-timeout 10"
+            - "performance.strict-o-direct on"
+            - "network.remote-dio enable"
+            - "performance.low-prio-threads 32"
+          when: volume_check.rc != 0
+          failed_when: false
+
+        - name: Start Gluster volume
+          ansible.builtin.command: gluster volume start {{ gluster_volume_name }}
+          when: volume_check.rc != 0
+
+    - name: 7. Add Engine FQDN to /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '.*{{ engine_fqdn | regex_escape }}$'
+        line: "{{ engine_ip }} {{ engine_fqdn }}"
+        state: present
+
+    - name: 8. Find appliance OVA
+      ansible.builtin.find:
+        paths: /usr/share/ovirt-engine-appliance
+        patterns: "*.ova"
+      register: appliance_ova
+
+    - name: 9. Verify appliance exists
+      ansible.builtin.fail:
+        msg: "No appliance found. Install: dnf install ovirt-engine-appliance"
+      when: appliance_ova.matched == 0
+
+    - name: 10. Create hosted-engine answer file
+      ansible.builtin.copy:
+        dest: /root/he-answers.conf
+        mode: '0600'
+        content: |
+          [environment:default]
+          OVEHOSTED_CORE/deployProceed=bool:True
+          OVEHOSTED_CORE/screenProceed=bool:True
+          OVEHOSTED_CORE/confirmSettings=bool:True
+          
+          [environment:init]
+          OVEHOSTED_NETWORK/bridgeName=str:ovirtmgmt
+          OVEHOSTED_NETWORK/fqdn=str:{{ engine_fqdn }}
+          OVEHOSTED_NETWORK/gateway=str:{{ engine_gateway }}
+          
+          [environment:append]
+          # CRITICAL: Use existing bridge - do NOT create new one
+          OVEHOSTED_NETWORK/bridge_name=str:ovirtmgmt
+          OVEHOSTED_VDSM/useExistingBridge=bool:True
+          
+          # Network interface - leave empty to use existing bridge
+          OVEHOSTED_NETWORK/bridgeIf=none:None
+          OVEHOSTED_NETWORK/firewallManager=str:firewalld
+          
+          # Network settings
+          OVEHOSTED_NETWORK/host_name=str:{{ ansible_fqdn }}
+          OVEHOSTED_NETWORK/network_test=str:ping
+          
+          # VM Network configuration
+          OVEHOSTED_VM/cloudinitVMStaticCIDR=str:{{ engine_ip }}/24
+          OVEHOSTED_VM/cloudinitVMDNS=str:{{ engine_dns }}
+          OVEHOSTED_VM/cloudinitVMETCHOSTS=bool:True
+          OVEHOSTED_VM/cloudinitRootPwd=str:{{ engine_password }}
+          
+          # Engine configuration
+          OVEHOSTED_ENGINE/adminPassword=str:{{ engine_password }}
+          OVEHOSTED_ENGINE/appHostName=str:{{ engine_fqdn }}
+          
+          # VM Resources
+          OVEHOSTED_VM/vmMemSizeMB=int:{{ engine_vm_memory }}
+          OVEHOSTED_VM/vmVCpus=str:{{ engine_vm_vcpus }}
+          OVEHOSTED_VM/vmDiskSizeGB=int:{{ engine_vm_disk_size }}
+          
+          # Console
+          OVEHOSTED_VM/consoleType=str:vnc
+          
+          # Storage - GlusterFS
+          OVEHOSTED_STORAGE/storageDomainConnection=str:{{ ansible_fqdn }}:/{{ gluster_volume_name }}
+          OVEHOSTED_STORAGE/storageDatacenterName=str:Default
+          OVEHOSTED_STORAGE/domainType=str:glusterfs
+          OVEHOSTED_STORAGE/storageDomainName=str:hosted_storage
+          OVEHOSTED_STORAGE/mntOptions=str:
+          
+          # Appliance
+          OVEHOSTED_VM/ovfArchive=str:{{ appliance_ova.files[0].path }}
+          
+          # Skip checks that cause issues
+          OVEHOSTED_CORE/additionalHostEnabled=bool:False
+          
+          # Notifications
+          OVEHOSTED_NOTIF/smtpServer=str:localhost
+          OVEHOSTED_NOTIF/smtpPort=str:25
+          OVEHOSTED_NOTIF/sourceEmail=str:root@localhost
+          OVEHOSTED_NOTIF/destEmail=str:root@localhost
+
+    - name: 11. Run hosted-engine deployment with answer file
+      ansible.builtin.shell: |
+        set -o pipefail
+        hosted-engine --deploy --4 --config-append=/root/he-answers.conf 2>&1 | tee /var/log/he-deploy.log
+      args:
+        executable: /bin/bash
+      register: he_result
+      async: 7200
+      poll: 30
+      failed_when: he_result.rc != 0
+
+    - name: 12. Display deployment log tail
+      ansible.builtin.command: tail -100 /var/log/he-deploy.log
+      register: log_tail
+      changed_when: false
+      when: he_result.rc != 0
+
+    - name: 13. Show log on failure
+      ansible.builtin.debug:
+        var: log_tail.stdout_lines
+      when: he_result.rc != 0
+
+    - name: 14. Wait for Engine to be ready
+      ansible.builtin.uri:
+        url: "https://{{ engine_fqdn }}/ovirt-engine/api"
+        validate_certs: false
+        status_code: [200, 401]
+      register: engine_health
+      until: engine_health.status in [200, 401]
+      retries: 60
+      delay: 10
+      when: he_result.rc == 0
+
+    - name: 15. Display summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Deployment Complete!"
+          - "=========================================="
+          - "URL: https://{{ engine_fqdn }}/ovirt-engine"
+          - "User: admin@internal"
+          - "Password: {{ engine_password }}"
+          - ""
+          - "Check status: hosted-engine --vm-status"
+          - "Storage: GlusterFS at {{ local_storage_path }}/brick1"
+          - ""
+          - "Full log: /var/log/he-deploy.log"
+      when: he_result.rc == 0

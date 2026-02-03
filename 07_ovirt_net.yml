@@ -1,0 +1,50 @@
+---
+- name: Configure ovirtmgmt network for VMs
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ovirt_engine_url: "https://ovirt.internal.cloudapp.net/ovirt-engine/api"
+    ovirt_engine_user: "admin@ovirt@internalsso"
+    ovirt_engine_password: "ChangeMe123!"
+    datacenter_name: "Default"
+    cluster_name: "Default"
+    host_name: "host1"
+    
+  tasks:
+    - name: Authenticate to oVirt
+      ovirt.ovirt.ovirt_auth:
+        url: "{{ ovirt_engine_url }}"
+        username: "{{ ovirt_engine_user }}"
+        password: "{{ ovirt_engine_password }}"
+        insecure: true
+      register: ovirt_auth
+      no_log: true
+
+    - name: Configure ovirtmgmt network for VM traffic
+      ovirt.ovirt.ovirt_cluster_network:
+        auth: "{{ ovirt_auth.ansible_facts.ovirt_auth }}"
+        cluster: "{{ cluster_name }}"
+        name: "ovirtmgmt"
+        required: true
+        display: false
+        migration: true
+        state: present
+      register: mgmt_network
+
+    - name: Get cluster network info
+      ovirt.ovirt.ovirt_cluster_network_info:
+        auth: "{{ ovirt_auth.ansible_facts.ovirt_auth }}"
+        cluster: "{{ cluster_name }}"
+      register: cluster_networks
+
+    - name: Display network configuration
+      ansible.builtin.debug:
+        msg:
+          - "ovirtmgmt network is now configured for VM traffic"
+          - "Network will be available when creating VMs"
+          - "Cluster networks: {{ cluster_networks.ovirt_cluster_networks | map(attribute='name') | list }}"
+
+    - name: Revoke authentication token
+      ovirt.ovirt.ovirt_auth:
+        state: absent
+        ovirt_auth: "{{ ovirt_auth.ansible_facts.ovirt_auth }}"

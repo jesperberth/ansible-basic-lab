@@ -1,0 +1,107 @@
+---
+- name: Deploy oVirt Hosted Engine on Single AlmaLinux 9 Host
+  hosts: ovirthosts
+  become: true
+  gather_facts: true
+
+  vars:
+    # --- Network Settings ---
+    # The Engine FQDN MUST be resolvable via DNS or /etc/hosts before starting
+    engine_fqdn: "ovirt-mgt.internal.cloudapp.net"
+    engine_ip: "10.1.0.25"
+    engine_gateway: "10.1.0.1"
+    engine_password: "ChangeMe123!"
+    local_storage_path: "/data/ovirt-storage"
+
+  tasks:
+    - name: Install and enable firewalld
+      ansible.builtin.dnf:
+        name: firewalld
+        state: present
+
+    - name: Start and enable firewalld service
+      ansible.builtin.systemd:
+        name: firewalld
+        state: started
+        enabled: true
+
+    - name: 1. Install oVirt Collection
+      ansible.builtin.shell: "ansible-galaxy collection install ovirt.ovirt"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: 2. Force Cleanup of previous attempts
+      ansible.builtin.shell: |
+        hosted-engine --cleanup --quiet || true
+        rm -rf {{ local_storage_path }}/*
+        ip link set ovirtmgmt down || true
+        ip link delete ovirtmgmt type bridge || true
+      failed_when: false
+
+    - name: 3. Prepare Storage Permissions
+      ansible.builtin.file:
+        path: "{{ local_storage_path }}"
+        state: directory
+        owner: 36
+        group: 36
+        mode: '0775'
+
+    - name: 3.5. Map Engine FQDN to its dedicated IP in /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        # This looks for any line ending with your engine_fqdn
+        regexp: '.*{{ engine_fqdn | replace(".", "\\.") }}$'
+        line: "{{ engine_ip }} {{ engine_fqdn }}"
+        state: present
+
+    - name: 4. Run Hosted Engine Deployment
+      ansible.builtin.include_role:
+        name: ovirt.ovirt.hosted_engine_setup
+      vars:
+        # 1. THE ESSENTIAL "FAKE" (Do not remove this)
+        # This satisfies the internal Ansible logic that is crashing on stdout_lines
+        fqdn_resolution_output:
+          rc: 0
+          stdout: "{{ engine_ip | trim }}"
+          stdout_lines: 
+            - "{{ engine_ip | trim }}"
+
+        # --- FORCE IPV4 ONLY & BYPASS BUGS ---
+        he_ipv4_settings: "static"
+        he_ipv6_settings: "none"
+        he_offline_deployment: true
+        
+        # This tells the role "Don't try to calculate this, I'm telling you it's false"
+        ipv6_deployment: false
+        
+        # --- NETWORK (Azure Bridge) ---
+        he_bridge_name: "ovirtmgmt"
+        he_mgmt_network_interface: "ovirtmgmt"
+        he_use_existing_bridge: true
+        
+        # --- IDENTITY ---
+        he_fqdn: "{{ engine_fqdn }}"
+        he_mgmt_network_address: "{{ engine_ip | trim }}"
+        he_mgmt_network_ipv4_gateway: "10.1.0.1"
+        he_mgmt_network_netmask: "255.255.255.0"
+        
+        # --- BYPASS VALIDATORS ---
+        he_enable_pre_checks: false
+        he_check_local_fqdn_resolution: false
+        he_is_single_host_setup: true
+        
+        # --- RESOURCES ---
+        he_mem_size_MB: 8192
+        he_vcpus: 4
+        
+        # --- STORAGE & OS ---
+        he_appliance_password: "{{ engine_password }}"
+        he_admin_password: "{{ engine_password }}"
+        he_storage_type: "localfs"
+        he_storage_domain_name: "hosted_storage"
+        he_storage_domain_path: "{{ local_storage_path }}"
+        he_storage_domain_addr: "localhost"
+        he_mount_options: "rw"
+        he_os_version: "rhel_9"
+        he_reboot_host: false

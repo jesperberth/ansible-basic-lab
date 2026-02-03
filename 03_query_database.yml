@@ -4,61 +4,52 @@
   gather_facts: true
 
   vars:
-    sql_user: sa
-    sql_password: "P@ssw0rd123!"
+    sql_admin_user: server5\work1
+    sql_admin_password: HJKLasdf!ery@2J
+    app_user: "appuser"
+    app_password: "AppP@ss123!"
+    database_name: TestDB
 
   tasks:
     - name: Get Windows host IP address
       ansible.builtin.set_fact:
         sql_host: "{{ hostvars[inventory_hostname]['ansible_host'] | default(inventory_hostname) }}"
 
-    - name: Get SQL Server version
+    - name: Create table Items
       community.general.mssql_script:
         login_host: "{{ sql_host }}"
-        login_user: "{{ sql_user }}"
-        login_password: "{{ sql_password }}"
+        login_user: "{{ sql_admin_user }}"
+        login_password: "{{ sql_admin_password }}"
         login_port: 1433
-        script: "SELECT @@VERSION AS Version"
-      register: sql_version
+        script: |
+          USE [{{ database_name }}];
+
+          -- Create the table if it doesn't exist
+          IF OBJECT_ID('Items', 'U') IS NULL
+          BEGIN
+              CREATE TABLE Items (
+                  ItemID INT PRIMARY KEY IDENTITY(1,1),
+                  ItemName NVARCHAR(50),
+                  Category NVARCHAR(50),
+                  Price DECIMAL(10, 2),
+                  CreatedAt DATETIME DEFAULT GETDATE()
+              );
+          END
+
+          -- Add 10 rows only if the table is currently empty
+          IF (SELECT COUNT(*) FROM Items) = 0
+          BEGIN
+              INSERT INTO Items (ItemName, Category, Price) VALUES
+              ('Thermal Paste', 'Cooling', 9.99),
+              ('Mechanical Keyboard', 'Peripherals', 89.50),
+              ('Gaming Mouse', 'Peripherals', 45.00),
+              ('27-inch Monitor', 'Displays', 220.00),
+              ('HDMI Cable 2m', 'Cables', 12.99),
+              ('USB-C Hub', 'Accessories', 35.00),
+              ('Webcam 1080p', 'Peripherals', 55.00),
+              ('External SSD 1TB', 'Storage', 110.00),
+              ('Desk Mat', 'Accessories', 15.00),
+              ('LED Strip', 'Lighting', 20.00);
+          END
+      register: query_result
       delegate_to: localhost
-
-    - name: Display SQL Server version
-      ansible.builtin.debug:
-        msg: "{{ sql_version.query_results[0][0][0] }}"
-
-    - name: List all databases
-      community.general.mssql_script:
-        login_host: "{{ sql_host }}"
-        login_user: "{{ sql_user }}"
-        login_password: "{{ sql_password }}"
-        login_port: 1433
-        script: "SELECT name, create_date FROM sys.databases ORDER BY name"
-      register: databases
-      delegate_to: localhost
-
-    - name: Display databases
-      ansible.builtin.debug:
-        msg: "{{ item[0] }} - Created: {{ item[1] }}"
-      loop: "{{ databases.query_results[0] }}"
-
-    - name: Get list of database names
-      community.general.mssql_script:
-        login_host: "{{ sql_host }}"
-        login_user: "{{ sql_user }}"
-        login_password: "{{ sql_password }}"
-        login_port: 1433
-        script: "SELECT name FROM sys.databases WHERE database_id > 4 ORDER BY name"
-      register: user_databases
-      delegate_to: localhost
-
-    - name: Check SQL Server services
-      ansible.windows.win_service_info:
-        name: "MSSQL$SQLEXPRESS"
-      register: sql_service_info
-
-    - name: Display service status
-      ansible.builtin.debug:
-        msg:
-          - "Service: {{ sql_service_info.services[0].display_name }}"
-          - "Status: {{ sql_service_info.services[0].state }}"
-          - "Start mode: {{ sql_service_info.services[0].start_mode }}"

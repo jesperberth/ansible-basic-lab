@@ -171,7 +171,6 @@
         src: /etc/pki/ovirt-engine/ca.pem
         dest: ~/ovirt-ca.pem
         flat: true
-      when: ovirt_configured.stat.exists
 
     - name: Display completion message
       ansible.builtin.debug:

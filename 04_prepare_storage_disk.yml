@@ -5,20 +5,164 @@
   gather_facts: true
 
   vars:
-    storage_disk: "/dev/sdb"
     storage_mount_path: "/data/ovirt-storage"
     storage_filesystem: "xfs"
+    # Minimum size in GB for the storage disk
+    min_disk_size_gb: 100
 
   tasks:
-    - name: Check if disk exists
-      ansible.builtin.stat:
-        path: "{{ storage_disk }}"
-      register: disk_check
+    - name: Get list of all block devices with detailed info
+      ansible.builtin.shell:
+        cmd: |
+          lsblk -ndo NAME,SIZE,TYPE,MOUNTPOINT -b | awk '$3=="disk" {print $1","$2","$4}'
+      register: all_disks_raw
+      changed_when: false
 
-    - name: Fail if disk does not exist
+    - name: Display all available disks
+      ansible.builtin.debug:
+        msg: "{{ all_disks_raw.stdout_lines }}"
+
+    - name: Get detailed information for each disk
+      ansible.builtin.shell:
+        cmd: |
+          DISK="{{ item.split(',')[0] }}"
+          SIZE="{{ item.split(',')[1] }}"
+          MOUNTPOINT="{{ item.split(',')[2] | default('') }}"
+          
+          # Check if disk itself is mounted
+          DISK_MOUNTED=$(lsblk -no MOUNTPOINT /dev/$DISK 2>/dev/null | grep -v '^$' | wc -l)
+          
+          # Check if disk has any mounted partitions
+          PART_MOUNTED=$(lsblk -no MOUNTPOINT /dev/$DISK 2>/dev/null | grep -v '^$' | head -1)
+          
+          # Check number of partitions
+          PART_COUNT=$(lsblk -nlo NAME /dev/$DISK 2>/dev/null | tail -n +2 | wc -l)
+          
+          # Check for filesystem on the disk itself (not partitions)
+          DISK_FS=$(blkid /dev/$DISK 2>/dev/null | wc -l)
+          
+          # Check for partition table
+          PART_TABLE=$(parted -s /dev/$DISK print 2>/dev/null | grep -i "Partition Table:" | awk '{print $3}')
+          
+          echo "$DISK|$SIZE|$DISK_MOUNTED|$PART_MOUNTED|$PART_COUNT|$DISK_FS|$PART_TABLE"
+      register: disk_details
+      loop: "{{ all_disks_raw.stdout_lines }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Parse disk information
+      ansible.builtin.set_fact:
+        parsed_disks: >-
+          {{
+            disk_details.results | map(attribute='stdout') | 
+            map('split', '|') |
+            map('list') |
+            list
+          }}
+
+    - name: Display detailed disk information
+      ansible.builtin.debug:
+        msg:
+          - "Disk: /dev/{{ item.0 }}"
+          - "Size: {{ (item.1 | int / (1024*1024*1024)) | round(2) }} GB"
+          - "Disk mounted: {{ 'Yes' if item.2 | int > 0 else 'No' }}"
+          - "Has mounted partitions: {{ 'Yes (' + item.3 + ')' if item.3 != '' else 'No' }}"
+          - "Partition count: {{ item.4 }}"
+          - "Has filesystem on disk: {{ 'Yes' if item.5 | int > 0 else 'No' }}"
+          - "Partition table: {{ item.6 if item.6 != '' else 'None' }}"
+          - "---"
+      loop: "{{ parsed_disks }}"
+
+    - name: Identify suitable disks
+      ansible.builtin.set_fact:
+        suitable_disks: >-
+          {{
+            parsed_disks |
+            selectattr('2', 'equalto', '0') |
+            selectattr('3', 'equalto', '') |
+            selectattr('4', 'equalto', '0') |
+            selectattr('1', 'gt', (min_disk_size_gb * 1024 * 1024 * 1024) | string) |
+            list
+          }}
+
+    - name: Display suitable disks
+      ansible.builtin.debug:
+        msg: "Found {{ suitable_disks | length }} suitable disk(s): {{ suitable_disks | map(attribute='0') | list }}"
+
+    - name: Fail if no suitable disk found
       ansible.builtin.fail:
-        msg: "Disk {{ storage_disk }} does not exist on {{ inventory_hostname }}"
-      when: not disk_check.stat.exists
+        msg: |
+          No suitable free disk found on {{ inventory_hostname }}.
+          Requirements:
+            - Disk must not be mounted
+            - Disk must have no mounted partitions
+            - Disk must have no partitions
+            - Disk must be at least {{ min_disk_size_gb }}GB
+          
+          Available disks:
+          {% for disk in parsed_disks %}
+          - /dev/{{ disk.0 }}: {{ (disk.1 | int / (1024*1024*1024)) | round(2) }}GB, Partitions: {{ disk.4 }}, Mounted: {{ 'Yes' if disk.2 | int > 0 or disk.3 != '' else 'No' }}
+          {% endfor %}
+      when: suitable_disks | length == 0
+
+    - name: Select the largest suitable disk
+      ansible.builtin.set_fact:
+        selected_disk: "{{ suitable_disks | sort(attribute='1', reverse=true) | first }}"
+
+    - name: Set storage disk variable
+      ansible.builtin.set_fact:
+        storage_disk: "/dev/{{ selected_disk.0 }}"
+
+    - name: Display selected disk
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Selected disk for oVirt storage:"
+          - "Device: {{ storage_disk }}"
+          - "Size: {{ (selected_disk.1 | int / (1024*1024*1024)) | round(2) }} GB"
+          - "Partitions: {{ selected_disk.4 }}"
+          - "Partition table: {{ selected_disk.6 if selected_disk.6 != '' else 'None' }}"
+          - "=========================================="
+
+    - name: Check if disk needs to be wiped
+      ansible.builtin.set_fact:
+        needs_wipe: "{{ selected_disk.6 != '' or selected_disk.5 | int > 0 }}"
+
+    - name: Display wipe warning
+      ansible.builtin.debug:
+        msg:
+          - "WARNING: Disk {{ storage_disk }} has existing partition table or filesystem signatures"
+          - "Partition table: {{ selected_disk.6 }}"
+          - "This will be wiped before creating the new filesystem"
+      when: needs_wipe
+
+    # - name: Confirm disk selection
+    #   ansible.builtin.pause:
+    #     prompt: |
+          
+    #       Selected disk: {{ storage_disk }}
+    #       Size: {{ (selected_disk.1 | int / (1024*1024*1024)) | round(2) }} GB
+    #       {% if needs_wipe %}
+    #       WARNING: This disk has existing partition table ({{ selected_disk.6 }}) that will be wiped!
+    #       {% endif %}
+          
+    #       This disk will be formatted with {{ storage_filesystem }} filesystem.
+    #       ALL DATA ON THIS DISK WILL BE LOST!
+          
+    #       Press ENTER to continue or Ctrl+C to abort...
+
+    - name: Wipe partition table and signatures if needed
+      ansible.builtin.shell:
+        cmd: |
+          # Wipe filesystem signatures
+          wipefs -a {{ storage_disk }}
+          # Zero out first and last 10MB
+          dd if=/dev/zero of={{ storage_disk }} bs=1M count=10 conv=notrunc
+          dd if=/dev/zero of={{ storage_disk }} bs=1M seek=$(($(blockdev --getsize64 {{ storage_disk }}) / 1048576 - 10)) count=10 conv=notrunc
+          # Inform kernel of changes
+          partprobe {{ storage_disk }} || true
+          sleep 2
+      when: needs_wipe
 
     - name: Display all multipath devices
       ansible.builtin.command:
@@ -35,7 +179,7 @@
     - name: Get multipath device for disk
       ansible.builtin.shell:
         cmd: |
-          # Get the device name (e.g., sdb)
+          # Get the device name (e.g., sda)
           DISK=$(basename {{ storage_disk }})
           # Find the multipath device that uses this disk
           multipath -ll | grep -B 3 "$DISK" | head -1 | awk '{print $1}'          
@@ -76,18 +220,12 @@
         msg: "Existing filesystem type: {{ blkid_check.stdout }}"
       when: blkid_check.rc == 0 and blkid_check.stdout != ""
 
-    - name: Create XFS filesystem directly on multipath device
+    - name: Create XFS filesystem directly on device
       community.general.filesystem:
         fstype: "{{ storage_filesystem }}"
         dev: "{{ device_to_use }}"
-        force: false  # Set to true to recreate filesystem
+        force: no
       register: fs_result
-      when: blkid_check.rc != 0 or blkid_check.stdout == ""
-
-    - name: Display filesystem creation result
-      ansible.builtin.debug:
-        msg: "Filesystem already exists ({{ blkid_check.stdout }}), skipping creation"
-      when: blkid_check.rc == 0 and blkid_check.stdout != ""
 
     - name: Wait for filesystem to be recognized
       ansible.builtin.pause:

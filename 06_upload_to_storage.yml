@@ -34,7 +34,7 @@
       ovirt.ovirt.ovirt_disk:
         auth: "{{ ovirt_auth.ansible_facts.ovirt_auth }}"
         name: "ubuntu-24.04.3-server"
-        upload_image_path: "{{ iso_path }}"
+        upload_image_path: "{{ iso_path | expanduser }}"
         storage_domain: "{{ storage_domain_name }}"
         format: raw
         content_type: iso
