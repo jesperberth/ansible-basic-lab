@@ -4,6 +4,10 @@ plugin: azure.azcollection.azure_rm
 # Authentication - reads from ~/.azure/credentials by default
 auth_source: auto
 
+hostvar_expressions:
+  # Use the VM's name instead of public IP
+  ansible_host: name
+
 # Filter by resource group (optional)
 include_vm_resource_groups:
   - '*'

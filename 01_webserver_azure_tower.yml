@@ -1,6 +1,6 @@
 ---
 - name: Configure Webserver
-  hosts: tag_solution_webserver_work1
+  hosts: tag_solution_webserver_work2
   become: true
 
   tasks:

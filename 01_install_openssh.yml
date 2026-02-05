@@ -40,15 +40,25 @@
         state: started
         start_mode: auto
 
+    # - name: Configure firewall rule for SSH
+    #   ansible.windows.win_shell: |
+    #     New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server (sshd)' `
+    #       -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+    #   register: firewall_rule
+    #   failed_when:
+    #     - firewall_rule.rc != 0
+    #     - "'already exists' not in firewall_rule.stderr"
+    #   changed_when: "'already exists' not in firewall_rule.stderr"
+
     - name: Configure firewall rule for SSH
-      ansible.windows.win_shell: |
-        New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server (sshd)' `
-          -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22        
-      register: firewall_rule
-      failed_when:
-        - firewall_rule.rc != 0
-        - "'already exists' not in firewall_rule.stderr"
-      changed_when: "'already exists' not in firewall_rule.stderr"
+      community.windows.win_firewall_rule:
+        name: OpenSSH Server (sshd)
+        localport: 22
+        action: allow
+        direction: in
+        protocol: tcp
+        state: present
+        enabled: true
 
     - name: Set default shell to PowerShell
       ansible.windows.win_shell: |

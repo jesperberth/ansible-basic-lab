@@ -1,6 +1,6 @@
 ---
 - name: Loop Playbook
-  hosts: copenhagen
+  hosts: stockholm
   gather_facts: true
 
   vars:

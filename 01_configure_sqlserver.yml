@@ -1,0 +1,57 @@
+---
+- name: Configure SQL Server
+  hosts: windows
+  gather_facts: true
+  become: true
+  become_method: runas
+  become_user: SYSTEM
+
+  vars:
+    sql_instance_name: MSSQLSERVER
+
+  tasks:
+    - name: Enable SQL Server Browser service
+      ansible.windows.win_service:
+        name: SQLBrowser
+        start_mode: auto
+        state: started
+
+    # - name: Configure firewall for SQL Server
+    #   ansible.windows.win_shell: |
+    #     New-NetFirewallRule -DisplayName "SQL Server" -Direction Inbound `
+    #       -Protocol TCP -LocalPort 1433 -Action Allow -Enabled True        
+    #   register: firewall_sql
+    #   failed_when:
+    #     - firewall_sql.rc != 0
+    #     - "'already exists' not in firewall_sql.stderr"
+    #   changed_when: "'already exists' not in firewall_sql.stderr"
+
+    - name: Configure firewall for SQL Server
+      community.windows.win_firewall_rule:
+        name: SQL Server
+        localport: 1433
+        action: allow
+        direction: in
+        protocol: tcp
+        state: present
+        enabled: true
+
+    # - name: Configure firewall for SQL Browser
+    #   ansible.windows.win_shell: |
+    #     New-NetFirewallRule -DisplayName "SQL Browser" -Direction Inbound `
+    #       -Protocol UDP -LocalPort 1434 -Action Allow -Enabled True        
+    #   register: firewall_browser
+    #   failed_when:
+    #     - firewall_browser.rc != 0
+    #     - "'already exists' not in firewall_browser.stderr"
+    #   changed_when: "'already exists' not in firewall_browser.stderr"
+
+    - name: Configure firewall for SQL Browser
+      community.windows.win_firewall_rule:
+        name: SQL Browser
+        localport: 1434
+        action: allow
+        direction: in
+        protocol: tcp
+        state: present
+        enabled: true

@@ -4,8 +4,8 @@
   gather_facts: true
 
   vars:
-    sql_admin_user: server5\work1
-    sql_admin_password: HJKLasdf!ery@2J
+    sql_admin_user: server5\work2
+    sql_admin_password: HJKLasdf!ery@2T
     database_name: TestDB
     app_user: appuser
     app_password: "AppP@ss123!"
